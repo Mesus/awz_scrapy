@@ -29,7 +29,7 @@ func init() {
 // UpdateClashConfig 从数据库获取Clash配置，转换后写入clash.yaml文件
 func UpdateClashConfig() error {
 	// 创建数据库连接
-	postgresDB, convHost, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
@@ -39,6 +39,12 @@ func UpdateClashConfig() error {
 	clashConfig, err := postgresDB.GetClashConfig()
 	if err != nil {
 		return fmt.Errorf("获取clash配置失败: %v", err)
+	}
+
+	// 获取conv配置
+	convHost, err := postgresDB.GetConvConfig()
+	if err != nil {
+		return fmt.Errorf("获取conv配置失败: %v", err)
 	}
 
 	// URL编码配置

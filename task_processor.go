@@ -499,7 +499,12 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			// 设置URL
 			amazonDomain := GetAmazonDomain(currentTaskCode)
 			if productURL != "" {
-				prodItem.URL = productURL
+				// 检查productURL是否包含完整域名，如果不包含则添加
+				if strings.HasPrefix(productURL, "/") {
+					prodItem.URL = fmt.Sprintf("https://www.%s%s", amazonDomain, productURL)
+				} else {
+					prodItem.URL = productURL
+				}
 			} else {
 				prodItem.URL = fmt.Sprintf("https://www.%s/dp/%s", amazonDomain, prodItem.ASIN)
 			}
@@ -931,7 +936,7 @@ type MongoReviews struct {
 // SaveResultsToMongoDB 将结果保存到MongoDB
 func SaveResultsToMongoDB(products []Product, taskID string) error {
 	// 创建数据库连接
-	postgresDB, _, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
@@ -1061,7 +1066,7 @@ type RedisResult struct {
 
 func SaveResultsToRedis(task *Task) error {
 	// 创建数据库连接
-	postgresDB, _, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
