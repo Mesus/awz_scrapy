@@ -798,7 +798,7 @@ func main() {
 
 	// 解析命令行参数
 	flag.Parse()
-	*taskID = "a08ba339-f94f-437d-ae8b-9aa28b643ae7"
+	//*taskID = "a08ba339-f94f-437d-ae8b-9aa28b643ae7"
 	// 验证必要参数
 	if *taskID == "" {
 		fmt.Println("错误: 必须提供任务ID (--id)")
