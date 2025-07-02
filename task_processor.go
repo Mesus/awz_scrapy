@@ -43,6 +43,7 @@ type Task struct {
 	TotalResultCount int         `json:"total_result_count"`
 	Code             string      `json:"code"`
 	ZipCode          string      `json:"zip_code"`
+	RightWord        string      `json:"rightword"`
 }
 
 // Position 表示产品在搜索结果中的位置
@@ -78,6 +79,7 @@ type Product struct {
 	AmazonPrime  bool     `json:"amazon_prime"`
 	Title        string   `json:"title"`
 	Thumbnail    string   `json:"thumbnail"`
+	Keyword      string   `json:"keyword"`
 }
 
 // 全局变量
@@ -166,7 +168,7 @@ func ProcessingTask(task *Task) string {
 			}
 		} else if resultType == "mongo" || resultType == "" {
 			// 保存结果到MongoDB
-			err2 := SaveResultsToMongoDB(task.Result, task.TaskID)
+			err2 := SaveResultsToMongoDB(task.Result, task.TaskID, task.RightWord)
 			if err2 != nil {
 				logs.Err("保存结果到MongoDB失败: %v", err2)
 				// 保存结果失败不影响任务状态
@@ -192,7 +194,13 @@ func ProcessingTask(task *Task) string {
 }
 
 func createClient() *resty.Client {
-	clash := proxy.New("clash.yaml")
+	ex, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	exPath := filepath.Dir(ex)
+	fmt.Println("可执行文件所在目录:", exPath)
+	clash := proxy.New(exPath + "/clash.yaml")
 	clash.Start()
 	// 创建代理URL
 	proxyURL, err := url.Parse("http://127.0.0.1:7890")
@@ -320,12 +328,18 @@ func SearchProducts(task *Task) []Product {
 			}
 
 			// 解析产品
-			pageResult := ScrapePageProds(doc, currentPage)
+			searchResult := ScrapePageProds(doc, currentPage, respHTML, task.Keyword)
+			pageResult := searchResult.Products
 			log.Printf("<%s> ======  search keyword: %s, page: %d is done, result length: %d  ======",
 				time.Now().Format("2006-01-02 15:04:05"), kw, currentPage, len(pageResult))
 
 			// 添加到结果集
 			allResults = append(allResults, pageResult...)
+
+			// 如果找到了正确的单词，设置到任务中
+			if searchResult.RightWord != "" {
+				task.RightWord = searchResult.RightWord
+			}
 
 			// 记录已处理的请求
 			StackInHandledRequests(fmt.Sprintf("%s_%d", task.Keyword, currentPage))
@@ -409,9 +423,52 @@ func SearchProducts(task *Task) []Product {
 	return allResults
 }
 
+// SearchResult 搜索结果结构体
+type SearchResult struct {
+	Products  []Product `json:"products"`
+	RightWord string    `json:"rightword"`
+}
+
 // ScrapePageProds 解析页面中的产品信息
-func ScrapePageProds(doc *goquery.Document, page int) []Product {
-	prodList := []Product{}
+func ScrapePageProds(doc *goquery.Document, page int, respHTML string, keyword string) SearchResult {
+	result := SearchResult{
+		Products:  []Product{},
+		RightWord: "",
+	}
+	//fmt.Println(doc.Contents().Text())
+
+	// 从P.declare元数据中提取keywords值
+	keywordFromMetadata := ""
+	// 尝试多种可能的正则表达式模式来匹配keywords
+	keywordsPatterns := []string{
+		`P\.declare\('s\\-metadata',\s*\{.*?"keywords":"([^"]+)".*?\}\)`,
+		`P\.declare\('s-metadata',\s*\{.*?"keywords":"([^"]+)".*?\}\)`,
+		`"keywords":"([^"]+)"`,
+	}
+
+	for _, pattern := range keywordsPatterns {
+		keywordsRe := regexp.MustCompile(pattern)
+		keywordsMatches := keywordsRe.FindStringSubmatch(respHTML)
+		if len(keywordsMatches) > 1 {
+			keywordFromMetadata = keywordsMatches[1]
+			break
+		}
+	}
+
+	// 在整个页面内容中查找"Search instead for {keyword}"
+	pageContent := doc.Text()
+	searchInsteadPattern := fmt.Sprintf("Search instead for %s", keyword)
+	if strings.Contains(pageContent, searchInsteadPattern) {
+		if keywordFromMetadata != "" {
+			result.RightWord = keywordFromMetadata
+			log.Printf("[INFO] 在页面内容中找到'Search instead for %s'，设置rightword为元数据中的关键词: %s", keyword, keywordFromMetadata)
+		} else {
+			result.RightWord = keyword
+			log.Printf("[INFO] 在页面内容中找到'Search instead for %s'，未找到元数据关键词，设置rightword为: %s", keyword, keyword)
+		}
+	} else {
+		log.Printf("[INFO] 在页面内容中未找到'Search instead for %s'，rightword保持为空", keyword)
+	}
 
 	try := func() {
 		eleSearchResults := doc.Find(".s-search-results [data-component-type=\"s-search-result\"]")
@@ -536,6 +593,18 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 				prodItem.URL = fmt.Sprintf("https://www.%s/dp/%s", amazonDomain, prodItem.ASIN)
 			}
 
+			// 从URL中解析keywords参数
+			prodItem.Keyword = ""
+			if parsedURL, err := url.Parse(prodItem.URL); err == nil {
+				queryParams := parsedURL.Query()
+				if keywords, exists := queryParams["keywords"]; exists && len(keywords) > 0 {
+					prodItem.Keyword = keywords[0]
+				} else if k, exists := queryParams["k"]; exists && len(k) > 0 {
+					// Amazon有时使用k作为关键词参数
+					prodItem.Keyword = k[0]
+				}
+			}
+
 			// 设置其他属性
 			prodItem.Sponsored = item.Find("span.puis-sponsored-label-info-icon").Length() > 0 || strings.Contains(prodItem.URL, "/sspa/")
 			prodItem.AmazonChoice = item.Find(fmt.Sprintf("span[id='%s-amazons-choice']", prodItem.ASIN)).Length() > 0
@@ -561,7 +630,7 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 				prodItem.Thumbnail, _ = eleThumbnail.Attr("src")
 			}
 
-			prodList = append(prodList, prodItem)
+			result.Products = append(result.Products, prodItem)
 		})
 	}
 
@@ -573,7 +642,24 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 
 	try()
 
-	return prodList
+	// 如果从元数据中提取到了keywords值，为所有没有关键词的产品设置关键词
+	for i := range result.Products {
+		result.Products[i].Keyword = keyword
+		log.Printf("[INFO] 为产品 %s 设置关键词: %s", result.Products[i].ASIN, keyword)
+	}
+	// if keywordFromMetadata != "" {
+	// 	log.Printf("[INFO] 从P.declare元数据中提取到keywords值: %s", keywordFromMetadata)
+	// 	for i := range result.Products {
+	// 		if result.Products[i].Keyword == "" {
+	// 			result.Products[i].Keyword = keywordFromMetadata
+	// 			log.Printf("[INFO] 为产品 %s 设置关键词: %s", result.Products[i].ASIN, keywordFromMetadata)
+	// 		}
+	// 	}
+	// } else {
+	// 	log.Printf("[INFO] 未能从P.declare元数据中提取到keywords值")
+	// }
+
+	return result
 }
 
 // ASINPage 处理ASIN页面任务
@@ -798,7 +884,7 @@ func main() {
 
 	// 解析命令行参数
 	flag.Parse()
-	//*taskID = "a08ba339-f94f-437d-ae8b-9aa28b643ae7"
+	//*taskID = "cf683e49-e572-4d7f-9cbc-f9bedcd4badc"
 	// 验证必要参数
 	if *taskID == "" {
 		fmt.Println("错误: 必须提供任务ID (--id)")
@@ -877,10 +963,11 @@ func main() {
 				} else {
 					fmt.Printf("警告: 关键词 '%s' 处理成功但没有找到产品\n", kw)
 				}
-			} else if result != "done" {
-				// 如果有任何一个关键词处理失败，记录整体状态为失败
-				overallResult = "failed"
 			}
+			//else if result != "done" {
+			//	// 如果有任何一个关键词处理失败，记录整体状态为失败
+			//	overallResult = "failed"
+			//}
 		}(keyword) // 立即传入当前关键词值
 	}
 
@@ -1029,6 +1116,8 @@ type MongoProduct struct {
 	BestSeller   bool          `json:"best_seller" bson:"best_seller"`
 	Thumbnail    string        `json:"thumbnail" bson:"thumbnail"`
 	TaskID       string        `json:"task_id" bson:"task_id"`
+	Keyword      string        `json:"keyword" bson:"keyword"`
+	RightWord    string        `json:"rightword" bson:"rightword"`
 }
 
 // MongoPosition 表示MongoDB中的位置信息
@@ -1052,7 +1141,7 @@ type MongoReviews struct {
 }
 
 // SaveResultsToMongoDB 将结果保存到MongoDB
-func SaveResultsToMongoDB(products []Product, taskID string) error {
+func SaveResultsToMongoDB(products []Product, taskID string, rightWord string) error {
 	// 创建数据库连接
 	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
@@ -1131,6 +1220,8 @@ func SaveResultsToMongoDB(products []Product, taskID string) error {
 			AmazonChoice: product.AmazonChoice,
 			BestSeller:   product.BestSeller,
 			Thumbnail:    product.Thumbnail,
+			Keyword:      product.Keyword,
+			RightWord:    rightWord,
 		}
 
 		mongoProducts = append(mongoProducts, mongoProduct)

@@ -107,6 +107,7 @@ func (c *Clash) Start() {
 		configFile := filepath.Join(C.Path.HomeDir(), C.Path.Config())
 		C.SetConfig(configFile)
 	}
+	fmt.Println(C.Path.HomeDir())
 	if err := config.Init(C.Path.HomeDir()); err != nil {
 		logs.Err("Initial configuration directory error: %s", err.Error())
 		return

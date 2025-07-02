@@ -13,7 +13,8 @@ COPY awesome ./
 
 # 复制必要的配置文件
 COPY .env ./
-
+COPY clash.yaml ./
+COPY Country.mmdb ./
 # 设置时区
 ENV TZ=Asia/Shanghai
 
