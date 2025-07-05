@@ -132,15 +132,20 @@ func ProcessingTask(task *Task) string {
 		}
 	}()
 
+	fmt.Printf("开始执行任务类型: %s, 关键词: %s\n", task.TaskType, task.Keyword)
+
 	switch task.TaskType {
 	case "search_products":
 		// 搜索产品
+		fmt.Printf("开始搜索产品，关键词: %s, 国家代码: %s\n", task.Keyword, task.Code)
 		task.Result = SearchProducts(task)
 		if len(task.Result) == 0 {
 			// 如果没有搜索到产品，返回失败状态
+			fmt.Printf("关键词 '%s' 没有搜索到产品，任务失败\n", task.Keyword)
 			return "failed"
 		}
 		task.Status = "done"
+		fmt.Printf("关键词 '%s' 搜索完成，找到 %d 个产品\n", task.Keyword, len(task.Result))
 
 		// 获取当前工作目录
 		wd, err := os.Getwd()
@@ -288,9 +293,11 @@ func SearchProducts(task *Task) []Product {
 	pageCount := 0
 
 	// 循环获取所有页面
+	fmt.Printf("关键词 '%s' 开始搜索，计划搜索 %d 页\n", kw, maxPage-minPage+1)
 	for currentPage <= maxPage && pageCount < maxPage {
 		log.Printf("<%s> start search keyword: %s, page: %d, URL: %s",
 			time.Now().Format("2006-01-02 15:04:05"), kw, currentPage, kwSearchURL)
+		fmt.Printf("关键词 '%s' 正在处理第 %d/%d 页\n", kw, currentPage, maxPage)
 
 		fmt.Println(kwSearchURL)
 		headers := map[string]string{
@@ -332,6 +339,7 @@ func SearchProducts(task *Task) []Product {
 			pageResult := searchResult.Products
 			log.Printf("<%s> ======  search keyword: %s, page: %d is done, result length: %d  ======",
 				time.Now().Format("2006-01-02 15:04:05"), kw, currentPage, len(pageResult))
+			fmt.Printf("关键词 '%s' 第 %d/%d 页处理完成，找到 %d 个产品\n", kw, currentPage, maxPage, len(pageResult))
 
 			// 添加到结果集
 			allResults = append(allResults, pageResult...)
@@ -473,9 +481,13 @@ func ScrapePageProds(doc *goquery.Document, page int, respHTML string, keyword s
 	try := func() {
 		eleSearchResults := doc.Find(".s-search-results [data-component-type=\"s-search-result\"]")
 		prodsCount := eleSearchResults.Length()
+		fmt.Printf("关键词 '%s' 第 %d 页找到 %d 个产品结果\n", keyword, page, prodsCount)
 		globalPosition := prodsCount * (page - 1)
 
 		eleSearchResults.Each(func(idx int, item *goquery.Selection) {
+			if idx%5 == 0 { // 每处理5个产品打印一次进度
+				fmt.Printf("关键词 '%s' 第 %d 页正在处理第 %d/%d 个产品\n", keyword, page, idx+1, prodsCount)
+			}
 			prodItem := Product{}
 
 			// 解析价格
@@ -914,12 +926,15 @@ func main() {
 		keywords[i] = strings.TrimSpace(keywords[i])
 	}
 
-	fmt.Printf("任务包含 %d 个关键词: %v\n", len(keywords), keywords)
+	fmt.Printf("任务ID: %s, 类型: %s, 包含 %d 个关键词: %v\n", *taskID, taskInfo.TaskType, len(keywords), keywords)
+	fmt.Printf("开始执行任务，时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 
 	// 用于存储所有关键词的结果
 	allResults := []Product{}
 	// 记录任务整体执行状态
-	overallResult := "done"
+	overallResult := "failed"
+	// 记录是否有任务成功
+	hasSuccessTask := false
 
 	// 使用WaitGroup等待所有协程完成
 	var wg sync.WaitGroup
@@ -927,13 +942,13 @@ func main() {
 	var mu sync.Mutex
 
 	// 对每个关键词并发执行采集任务
-	for _, keyword := range keywords {
+	for i, keyword := range keywords {
 		// 为每个关键词启动一个协程
 		wg.Add(1)
-		go func(kw string) {
+		go func(index int, kw string) {
 			defer wg.Done()
 
-			fmt.Printf("开始处理关键词: %s\n", kw)
+			fmt.Printf("开始处理关键词 [%d/%d]: %s\n", index+1, len(keywords), kw)
 
 			// 创建单个关键词的任务
 			task := Task{
@@ -957,6 +972,8 @@ func main() {
 
 			// 如果任务成功完成，将结果添加到总结果中
 			if result == "done" && task.TaskType == "search_products" {
+				// 标记有任务成功
+				hasSuccessTask = true
 				if len(task.Result) > 0 {
 					fmt.Printf("关键词 '%s' 找到 %d 个产品\n", kw, len(task.Result))
 					allResults = append(allResults, task.Result...)
@@ -964,18 +981,24 @@ func main() {
 					fmt.Printf("警告: 关键词 '%s' 处理成功但没有找到产品\n", kw)
 				}
 			}
-			//else if result != "done" {
-			//	// 如果有任何一个关键词处理失败，记录整体状态为失败
-			//	overallResult = "failed"
-			//}
-		}(keyword) // 立即传入当前关键词值
+		}(i, keyword) // 立即传入当前关键词索引和值
 	}
 
 	// 等待所有协程完成
+	fmt.Println("等待所有关键词处理完成...")
 	wg.Wait()
+	fmt.Printf("所有关键词处理完成，时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	// 如果有任务成功，则整体结果为成功
+	if hasSuccessTask {
+		overallResult = "done"
+		fmt.Println("至少有一个关键词任务成功，整体任务状态将设置为成功")
+	} else {
+		fmt.Println("所有关键词任务均失败，整体任务状态将设置为失败")
+	}
 
 	// 根据任务执行结果更新任务状态
-	fmt.Println(overallResult)
+	fmt.Printf("准备更新任务状态，结果: %s\n", overallResult)
 	if overallResult == "done" {
 		fmt.Println(taskInfo)
 		fmt.Println(taskInfo.TaskType)
@@ -997,30 +1020,33 @@ func main() {
 			fmt.Printf("所有关键词处理完成，共找到 %d 个不重复的ASIN\n", asinCount)
 
 			// 更新任务状态为已完成
+			fmt.Printf("正在更新数据库任务状态为'已完成'，ASIN数量: %d\n", asinCount)
 			updateErr := postgresDB.UpdateTaskSuccess(*taskID, asinCount)
 			if updateErr != nil {
 				fmt.Printf("更新任务状态失败: %v\n", updateErr)
 			} else {
-				fmt.Printf("任务执行成功，共找到 %d 个不重复的ASIN\n", asinCount)
+				fmt.Printf("数据库任务状态已更新为'已完成'，共找到 %d 个不重复的ASIN\n", asinCount)
 			}
 		} else {
 			// 其他类型的任务成功完成
+			fmt.Println("正在更新数据库任务状态为'已完成'")
 			updateErr := postgresDB.UpdateTaskSuccess(*taskID, 0)
 			if updateErr != nil {
 				fmt.Printf("更新任务状态失败: %v\n", updateErr)
 			} else {
-				fmt.Println("任务执行成功")
+				fmt.Println("数据库任务状态已更新为'已完成'")
 			}
 		}
 	} else {
-		// 如果任务执行失败
-		errMsg := fmt.Sprintf("任务执行失败，有 %d 个关键词处理失败", len(keywords)-len(allResults))
+		// 如果所有任务都执行失败
+		errMsg := fmt.Sprintf("任务执行失败，所有 %d 个关键词处理均失败", len(keywords))
 
+		fmt.Printf("正在更新数据库任务状态为'已失败'，原因: %s\n", errMsg)
 		updateErr := postgresDB.UpdateTaskFailed(*taskID, errMsg)
 		if updateErr != nil {
 			fmt.Printf("更新任务状态失败: %v\n", updateErr)
 		} else {
-			fmt.Println(errMsg)
+			fmt.Printf("数据库任务状态已更新为'已失败'，原因: %s\n", errMsg)
 		}
 	}
 }
@@ -1142,7 +1168,9 @@ type MongoReviews struct {
 
 // SaveResultsToMongoDB 将结果保存到MongoDB
 func SaveResultsToMongoDB(products []Product, taskID string, rightWord string) error {
+	fmt.Printf("开始保存 %d 个产品数据到MongoDB，任务ID: %s\n", len(products), taskID)
 	// 创建数据库连接
+	fmt.Println("正在连接PostgreSQL数据库获取MongoDB配置...")
 	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
@@ -1156,6 +1184,7 @@ func SaveResultsToMongoDB(products []Product, taskID string, rightWord string) e
 	}
 	fmt.Println("<UNK>MongoDB<UNK>:", mongoURL)
 	// 创建MongoDB客户端
+	fmt.Println("正在连接MongoDB数据库...")
 	clientOptions := options.Client().ApplyURI(mongoURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1164,6 +1193,7 @@ func SaveResultsToMongoDB(products []Product, taskID string, rightWord string) e
 	if err != nil {
 		return fmt.Errorf("连接MongoDB失败: %v", err)
 	}
+	fmt.Println("MongoDB连接成功")
 	defer func() {
 		if err := client.Disconnect(ctx); err != nil {
 			logs.Err("断开MongoDB连接失败: %v", err)
@@ -1187,8 +1217,12 @@ func SaveResultsToMongoDB(products []Product, taskID string, rightWord string) e
 	collection := database.Collection(taskID)
 
 	// 转换产品格式并插入数据库
+	fmt.Printf("正在转换 %d 个产品数据为MongoDB格式...\n", len(products))
 	var mongoProducts []interface{}
-	for _, product := range products {
+	for i, product := range products {
+		if i%100 == 0 && i > 0 { // 每处理100个产品打印一次进度
+			fmt.Printf("已转换 %d/%d 个产品数据...\n", i, len(products))
+		}
 		// 处理BeforePrice为null的情况
 		var beforePrice *float64
 		if product.Price.BeforePrice > 0 {
@@ -1229,11 +1263,15 @@ func SaveResultsToMongoDB(products []Product, taskID string, rightWord string) e
 
 	// 插入数据
 	if len(mongoProducts) > 0 {
+		fmt.Printf("正在将 %d 条产品数据插入到MongoDB集合 %s...\n", len(mongoProducts), taskID)
 		_, err = collection.InsertMany(ctx, mongoProducts)
 		if err != nil {
 			return fmt.Errorf("插入数据到MongoDB失败: %v", err)
 		}
+		fmt.Printf("成功将 %d 条产品数据保存到MongoDB集合 %s\n", len(mongoProducts), taskID)
 		logs.Info("成功将%d条产品数据保存到MongoDB集合%s", len(mongoProducts), taskID)
+	} else {
+		fmt.Println("没有产品数据需要保存到MongoDB")
 	}
 
 	return nil
