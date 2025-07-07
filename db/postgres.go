@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/joho/godotenv"
@@ -22,22 +24,45 @@ func NewPostgresDB() (*PostgresDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("获取工作目录失败: %v", err)
 	}
+	fmt.Printf("当前工作目录: %s\n", wd)
 
 	// 加载.env文件
 	envPath := filepath.Join(wd, ".env")
+	fmt.Printf("尝试加载环境变量文件: %s\n", envPath)
 	err = godotenv.Load(envPath)
 	if err != nil {
 		return nil, fmt.Errorf("加载.env文件失败: %v", err)
 	}
+	fmt.Println(".env文件加载成功")
 
 	// 构建连接字符串
 	connStr := os.Getenv("PG_URL")
+	if connStr == "" {
+		return nil, fmt.Errorf("环境变量PG_URL未设置或为空")
+	}
+	fmt.Println("成功获取PostgreSQL连接字符串")
 
 	// 创建连接池
-	pool, err := pgxpool.Connect(context.Background(), connStr)
+	fmt.Println("正在连接PostgreSQL数据库...")
+	// 使用带超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.Connect(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("连接数据库失败: %v", err)
 	}
+
+	// 测试连接
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+
+	err = pool.Ping(pingCtx)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("数据库连接测试失败: %v", err)
+	}
+	fmt.Println("PostgreSQL数据库连接成功")
 
 	return &PostgresDB{pool: pool}, nil
 }
@@ -53,11 +78,29 @@ func (db *PostgresDB) Close() {
 func (db *PostgresDB) GetConfig(configType string) (string, error) {
 	var values string
 
+	// 检查连接池是否已初始化
+	if db.pool == nil {
+		return "", fmt.Errorf("数据库连接池未初始化")
+	}
+
 	// 执行查询
 	query := "SELECT values FROM configs WHERE type = $1"
-	err := db.pool.QueryRow(context.Background(), query, configType).Scan(&values)
+	fmt.Printf("正在查询%s配置...\n", configType)
+
+	// 使用带超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := db.pool.QueryRow(ctx, query, configType).Scan(&values)
 	if err != nil {
 		return "", fmt.Errorf("查询%s配置失败: %v", configType, err)
+	}
+
+	// 检查值是否为空
+	if values == "" {
+		fmt.Printf("警告：%s配置值为空\n", configType)
+	} else {
+		fmt.Printf("成功获取%s配置，长度: %d\n", configType, len(values))
 	}
 
 	return values, nil
@@ -70,7 +113,22 @@ func (db *PostgresDB) GetClashConfig() (string, error) {
 
 // GetMongoConfig 查询configs表中type="mongo"的记录，返回values
 func (db *PostgresDB) GetMongoConfig() (string, error) {
-	return db.GetConfig("mongo")
+	config, err := db.GetConfig("mongo")
+	if err != nil {
+		return "", fmt.Errorf("获取MongoDB配置失败: %v", err)
+	}
+
+	// 检查配置是否为空
+	if config == "" {
+		return "", fmt.Errorf("MongoDB配置为空，请检查configs表中type=mongo的记录")
+	}
+
+	// 检查配置格式
+	if !strings.HasPrefix(config, "mongodb://") && !strings.HasPrefix(config, "mongodb+srv://") {
+		fmt.Printf("警告：MongoDB连接字符串格式可能不正确: %s\n", config)
+	}
+
+	return config, nil
 }
 
 // GetRedisConfig 查询configs表中type="redis"的记录，返回values
