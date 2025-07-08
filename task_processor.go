@@ -16,10 +16,13 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"       // 导入runtime包，用于获取运行时信息
+	"runtime/pprof" // 导入pprof包，用于CPU性能分析
 	"strconv"
 	"strings"
 	"sync"
@@ -401,7 +404,7 @@ func SearchProducts(task *Task) []Product {
 
 		if resp.StatusCode() == 200 {
 			respHTML := resp.String()
-
+			//fmt.Println(respHTML)
 			// 解析HTML
 			doc, err := goquery.NewDocumentFromReader(strings.NewReader(respHTML))
 			if err != nil {
@@ -589,12 +592,12 @@ func ScrapePageProds(doc *goquery.Document, page int, respHTML string, keyword s
 			eleDiscounted := item.Find("span.a-price.a-text-price")
 			currentPriceText := ""
 			if elePrice.Length() > 0 {
-				currentPriceText = elePrice.Find("span").Text()
+				currentPriceText = elePrice.Find("span.a-offscreen").Text()
 			}
 
 			discountPriceText := ""
 			if eleDiscounted.Length() > 0 {
-				discountPriceText = eleDiscounted.Find("span").Text()
+				discountPriceText = eleDiscounted.Find("span.a-offscreen").Text()
 			}
 
 			// 解析产品链接
@@ -612,7 +615,7 @@ func ScrapePageProds(doc *goquery.Document, page int, respHTML string, keyword s
 			}
 
 			// 解析星级
-			eleStar := item.Find("a.mvt-review-star-mini-popover,.a-icon-star-small")
+			eleStar := item.Find("[data-cy=\"reviews-block\"] a.a-popover-trigger")
 			starText := ""
 			if eleStar.Length() > 0 {
 				starText, _ = eleStar.Attr("aria-label")
@@ -664,14 +667,32 @@ func ScrapePageProds(doc *goquery.Document, page int, respHTML string, keyword s
 			// 设置评论信息
 			totalReviews := 0
 			if reviewsText != "" {
-				re := regexp.MustCompile(`,`)
-				reviewsClean := re.ReplaceAllString(reviewsText, "")
-				totalReviews, _ = strconv.Atoi(reviewsClean)
+				// 从 "X,XXX ratings" 格式中提取评论数
+				re := regexp.MustCompile(`([0-9,]+)\s+ratings`)
+				reviewsMatches := re.FindStringSubmatch(reviewsText)
+				if len(reviewsMatches) > 1 {
+					// 移除逗号后转换为整数
+					reviewsClean := strings.ReplaceAll(reviewsMatches[1], ",", "")
+					totalReviews, _ = strconv.Atoi(reviewsClean)
+				} else {
+					// 兼容旧格式，直接移除逗号
+					re := regexp.MustCompile(`,`)
+					reviewsClean := re.ReplaceAllString(reviewsText, "")
+					totalReviews, _ = strconv.Atoi(reviewsClean)
+				}
 			}
 
 			rating := 0.0
 			if starText != "" {
-				rating, _ = strconv.ParseFloat(starText, 64)
+				// 从 "X.X out of 5 stars" 格式中提取评分数值
+				ratingRegex := regexp.MustCompile(`([0-9.]+)\s+out\s+of\s+5\s+stars`)
+				ratingMatches := ratingRegex.FindStringSubmatch(starText)
+				if len(ratingMatches) > 1 {
+					rating, _ = strconv.ParseFloat(ratingMatches[1], 64)
+				} else {
+					// 尝试直接解析，兼容旧格式
+					rating, _ = strconv.ParseFloat(starText, 64)
+				}
 			}
 
 			prodItem.Reviews = Reviews{
@@ -1420,6 +1441,72 @@ func main() {
 	//if main1() {
 	//	return
 	//}
+	// 创建性能分析目录
+	if err := os.MkdirAll("cpu_profile", 0755); err != nil {
+		fmt.Printf("创建CPU性能分析目录失败: %v\n", err)
+	}
+
+	// 启动CPU性能分析，收集2分钟数据
+	go func() {
+		// 等待5秒，让程序先启动起来
+		time.Sleep(5 * time.Second)
+
+		// 创建CPU性能分析文件
+		timeStr := time.Now().Format("20060102_150405")
+		cpuFile, err := os.Create(fmt.Sprintf("cpu_profile/cpu_%s.pprof", timeStr))
+		if err != nil {
+			fmt.Printf("创建CPU性能分析文件失败: %v\n", err)
+			return
+		}
+		defer cpuFile.Close()
+
+		fmt.Println("开始收集CPU性能分析数据，将持续2分钟...")
+		// 开始CPU性能分析
+		if err := pprof.StartCPUProfile(cpuFile); err != nil {
+			fmt.Printf("启动CPU性能分析失败: %v\n", err)
+			return
+		}
+
+		// 2分钟后停止分析
+		time.Sleep(2 * time.Minute)
+		pprof.StopCPUProfile()
+
+		fmt.Printf("CPU性能分析数据收集完成，已保存到 cpu_profile/cpu_%s.pprof\n", timeStr)
+		fmt.Println("可以使用以下命令查看分析结果:")
+		fmt.Printf("go tool pprof -http=:8080 cpu_profile/cpu_%s.pprof\n", timeStr)
+	}()
+
+	// 启动pprof性能分析服务器
+	go func() {
+		// 添加自定义的性能分析处理器
+		http.HandleFunc("/debug/pprof/custom", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintf(w, "当前goroutine数量: %d\n", runtime.NumGoroutine())
+
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			fmt.Fprintf(w, "内存使用情况:\n")
+			fmt.Fprintf(w, "Alloc = %v MiB\n", m.Alloc/1024/1024)
+			fmt.Fprintf(w, "TotalAlloc = %v MiB\n", m.TotalAlloc/1024/1024)
+			fmt.Fprintf(w, "Sys = %v MiB\n", m.Sys/1024/1024)
+			fmt.Fprintf(w, "NumGC = %v\n", m.NumGC)
+		})
+
+		fmt.Println("启动pprof性能分析服务器在 :6060 端口")
+		fmt.Println("可以通过以下URL查看性能分析数据:")
+		fmt.Println("- http://localhost:6060/debug/pprof/ (概览)")
+		fmt.Println("- http://localhost:6060/debug/pprof/goroutine (Goroutine信息)")
+		fmt.Println("- http://localhost:6060/debug/pprof/heap (堆内存信息)")
+		fmt.Println("- http://localhost:6060/debug/pprof/threadcreate (线程创建信息)")
+		fmt.Println("- http://localhost:6060/debug/pprof/block (阻塞信息)")
+		fmt.Println("- http://localhost:6060/debug/pprof/mutex (互斥锁信息)")
+		fmt.Println("- http://localhost:6060/debug/pprof/custom (自定义性能信息)")
+
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			fmt.Printf("启动pprof服务器失败: %v\n", err)
+		}
+	}()
+
 	// 在需要更新配置的地方调用
 	nUp := os.Getenv("NEED_UPDATE")
 	if nUp == "true" {
@@ -1435,7 +1522,7 @@ func main() {
 
 	// 解析命令行参数
 	flag.Parse()
-	//*taskID = "cf683e49-e572-4d7f-9cbc-f9bedcd4badc"
+	*taskID = "468359a1-4d5b-4179-a505-c65ae0ebb7c2"
 	// 验证必要参数
 	if *taskID == "" {
 		fmt.Println("错误: 必须提供任务ID (--id)")
